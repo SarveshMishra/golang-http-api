@@ -2,11 +2,15 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"io/ioutil"
+
 	// "io"
 	// "io/ioutil"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -14,7 +18,7 @@ import (
 type timeHandler struct {
 	format string
 }
-type test_struct struct {
+type bhriguData struct {
 	Link string
 }
 type Event struct {
@@ -33,20 +37,25 @@ type Event struct {
 	Source      string
 }
 
-// Keys in query string
 const (
-	CATEGORY       string = "cat"
-	SOURCE         string = "src"
-	ACTION         string = "act"
-	LABEL          string = "lbl"
-	PAGEINFO       string = "pi"
-	QUERYSTRING    string = "qs"
-	REFERRER       string = "ref"
-	COOKIEID       string = "cid"
-	SESSIONID      string = "sid"
-	EVENTTIMESTAMP string = "ts"
-	BHRIGUCOOKIES  string = "bhrigu_cookies" // this should be shorter in length
-	RANDOM_STRING  string = "RS"
+	CATEGORY        string = "cat"
+	SOURCE          string = "src"
+	ACTION          string = "act"
+	LABEL           string = "lbl"
+	PAGEINFO        string = "pi"
+	QUERYSTRING     string = "qs"
+	REFERRER        string = "ref"
+	COOKIEID        string = "cid"
+	SESSIONID       string = "sid"
+	EVENTTIMESTAMP  string = "ts"
+	BHRIGUCOOKIES   string = "bhrigu_cookies" // this should be shorter in length
+	RANDOM_STRING   string = "RS"
+	BHRIGUCOOKIESV2 string = "bco"
+	COOKIE          string = "cookie"
+	// below are compulsory params
+	PAGETYPE      string = "pt"
+	APPLICATIONID string = "aid"
+	PLATFORMID    string = "pid"
 )
 
 func (th timeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -56,7 +65,7 @@ func (th timeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func main() {
 	// use the http.NewServeMux() function to create an empty servemux.
 	mux := http.NewServeMux()
-
+	port := ":8089"
 	rh := http.RedirectHandler("https://sarvesh.xyz", 307)
 	// thf := http.HandlerFunc(timeHandlerFunc)
 	mux.Handle("/foo", rh)
@@ -64,9 +73,10 @@ func main() {
 	mux.HandleFunc("/timeFunc", timeHandlerFunc)
 	mux.HandleFunc("/beacon", postDataHandler)
 	mux.HandleFunc("/get", getRequestHandler)
+	mux.HandleFunc("/bhrigu.gif", getOldEventFromNewEvent)
 
-	log.Print("listening...")
-	http.ListenAndServe(":3001", mux)
+	log.Printf("listening... on %v", port)
+	http.ListenAndServe(port, mux)
 
 }
 func timeHandlerFunc(w http.ResponseWriter, r *http.Request) {
@@ -115,7 +125,7 @@ func postDataHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	decoder := json.NewDecoder(r.Body)
 
-	var t test_struct
+	var t bhriguData
 	err := decoder.Decode(&t)
 	if err != nil {
 		panic(err)
@@ -154,7 +164,75 @@ func getRequestHandler(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, newUserSessionCookie)
 }
 
-// postRequestHandlerWithoutPayload handles post request without payload
-func postRequestHandlerWithoutPayload(w http.ResponseWriter, r *http.Request) {
+// getOldEventFromNewEvent handles post request without payload
+func getOldEventFromNewEvent(w http.ResponseWriter, r *http.Request) {
+	// log.Println(r)
+	var err error
+	var mandatoryData map[string]string
+	var trackingData map[string]string
+switch r.Method {
+	case "OPTION":
+		w.Header().Set("Access-Control-Allow-Methods", "POST, GET")
+	case "GET":
+		mandatoryData, trackingData, err = getDataFromQS(r)
+	case "POST":
+		mandatoryData, trackingData, err = getDataFromBody(r)
+	}
+	// r.url.Values.Add(r.URL.Query(), "test", "new")
+	var bhrigu_cookies = ""
+	params := make(url.Values)
+	for key, value := range trackingData {
+		if(key == "CWC" || key == "_cwv"){
+			bhrigu_cookies += key + "=" + value + "; "
+			continue
+		}
+		params.Add(key, value)
+	}
+	params.Add("bhrigu_cookies", bhrigu_cookies)
+	r.URL.Path = "https://bhrigu.carwale.com/bhrigu.gif?" + params.Encode()
+	log.Println(mandatoryData)
+	log.Println(trackingData)
+	log.Println(r.URL.Path)
+	log.Println(err)
+}
 
+// getDataFromQS return tracking data from query string url for GET
+func getDataFromQS(r *http.Request) (map[string]string,map[string]string, error) {
+	dataMap := make(map[string]string)
+	mandatoryData := make(map[string]string)
+	queries := r.URL.Query()
+	for key, value := range queries {
+		if key == PAGETYPE || key == APPLICATIONID || key == PLATFORMID {
+			mandatoryData[key] = value[len(value)-1]
+			continue
+		}
+		dataMap[key] = value[len(value)-1]
+	}
+	return mandatoryData, dataMap, nil
+}
+
+// getDataFromBody return tracking data from POST request body
+func getDataFromBody(r *http.Request) (map[string]string, map[string]string, error) {
+	var dataMap = map[string]string{}
+	var mandatoryData = map[string]string{}
+	if r.Body != nil {
+		body, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			return mandatoryData, dataMap, fmt.Errorf("[getDataFromBody] reading request body failed, request object is and error is : %v", err)
+		}
+		err = json.Unmarshal(body, &dataMap)
+		if err != nil {
+			return mandatoryData, dataMap, fmt.Errorf("[getDataFromBody] unmarshalling to json failed, request object is  and error is : %v", err)
+		}
+		// extracting validation data from datamap to avoid duplication in tracking data
+		for key, value := range dataMap {
+			if key == PAGETYPE || key == APPLICATIONID || key == PLATFORMID {
+				mandatoryData[key] = value
+				delete(dataMap, key)
+			}
+		}
+		return mandatoryData, dataMap, nil
+	}
+	err := fmt.Errorf("request does not contain payload in body")
+	return mandatoryData, dataMap, err
 }
